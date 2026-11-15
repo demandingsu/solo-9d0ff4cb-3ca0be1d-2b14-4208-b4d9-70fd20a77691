@@ -1,8 +1,12 @@
-# 环境监测数仓 · 原始站点表字段变更核查
+# 环境监测数仓值班工具
 
-值班数据工程师在原始站点表字段调整上线前，用本工具核查**哪些对外数据集列可能断供**：
-上传「变更前源字段清单」「变更后源字段清单」「跨作业字段依赖」三份 JSON，
-系统对照两版逐列给出 **正常 / 断供 / 待核实** 判定和完整依赖路径。
+面向值班数据工程师的两个网页工具（同一 FastAPI 应用、同一 SQLite 库）：
+
+1. **字段变更核查**（`/`）：原始站点表字段调整上线前，上传「变更前源字段清单」
+   「变更后源字段清单」「跨作业字段依赖」三份 JSON，对照两版逐列给出
+   **正常 / 断供 / 待核实** 判定和完整依赖路径。
+2. **站点观测批次入库**（`/ingest`）：站点观测重投 / 更正 / 撤回事件的批次入库，
+   按站点 × 小时查询**有效记录数与数值合计**。
 
 技术栈：FastAPI + SQLite + 原生 HTML/JS 单页，Docker Compose 一键运行。
 
@@ -10,11 +14,13 @@
 
 ```bash
 docker compose up --build
-# 打开 http://localhost:8000
+# 字段变更核查：http://localhost:8000
+# 观测批次入库：http://localhost:8000/ingest
 ```
 
-页面上可直接点「载入内置示例核查」一键体验，或下载示例文件修改后上传：
-`examples/sources_before.json`、`examples/sources_after.json`、`examples/dependencies.json`。
+核查页可点「载入内置示例核查」一键体验；入库页可点「载入示例批次」，
+或下载示例文件修改后上传：`examples/sources_before.json`、`examples/sources_after.json`、
+`examples/dependencies.json`、`examples/obs_events.json`。
 
 本地无 Docker 运行：
 
@@ -29,7 +35,40 @@ uvicorn app.main:app --port 8000
 python3 -m unittest discover -s tests -v
 ```
 
-## 判定口径
+## 观测批次入库
+
+### 事件格式
+
+批次文件为事件数组（或 `{"events": [...]}`），每个事件：
+
+```json
+{"observation_id": "obs-1001", "revision": 2, "station": "站点A",
+ "hour": "2026-11-15T08", "value": 35.2, "op": "upsert"}
+{"observation_id": "obs-1004", "revision": 2, "op": "retract"}
+```
+
+- `op: "upsert"` 写入 / 更正（`station`/`hour`/`value` 必填，`value` 须为有限数字）；
+- `op: "retract"` 撤回（站点/小时/数值可省略）；
+- `revision` 为非负整数，重投、更正、撤回都通过修订号表达先后。
+
+### 入库口径
+
+- **最高修订生效**：同一观测跨批次只采用最高修订号的记录，旧修订一律忽略，
+  不得回滚已有结果（撤回也是墓碑，能挡住迟到的旧修订，更高修订可重新写入）；
+- **同修订幂等**：同修订号重投且内容一致（操作、站点、小时、数值完全相同）
+  只计一次；**内容冲突则整批拒绝**，错误信息指出冲突的观测ID；
+- **先扣后计**：撤回、或更正改变了站点/小时/数值时，先从原 (站点, 小时)
+  汇总中扣除旧值，再计入新值；
+- **整批事务**：每批在一个 `BEGIN IMMEDIATE` 事务内应用——两批同时上传串行生效，
+  互不丢彼此的有效修订；汇总只在提交时变化，查询只读到完整已发布的结果，
+  失败批次（格式错误 400 / 内容冲突 409）保留旧结果并在批次历史中留痕。
+
+### 查询
+
+入库页展示各站点 × 小时的有效记录数与数值合计（可按站点过滤），
+以及最近 20 条批次历史（含每批生效/撤回/去重/旧修订统计与失败原因）。
+
+## 字段变更核查：判定口径
 
 每个产出列允许 **多组输入**：
 
@@ -92,18 +131,23 @@ python3 -m unittest discover -s tests -v
 | POST | `/api/snapshots` | multipart 上传 `sources_before` / `sources_after` / `dependencies` + 可选 `name`；成功整版发布，失败 400 且保留旧版 |
 | GET | `/api/snapshots/current` | 现役版本全量内容（输入 + 判定报告） |
 | GET | `/api/snapshots` | 版本历史（含失败记录） |
-| GET | `/examples/{name}` | 三份示例文件下载 |
-| GET | `/` | 核查页面 |
+| POST | `/api/observations/batches` | multipart 上传 `events_file`（观测事件批次 JSON）+ 可选 `name`；成功 201 整批生效，格式错误 400 / 同修订内容冲突 409，失败均保留旧汇总并留痕 |
+| GET | `/api/observations/summary` | 各站点 × 小时的有效记录数与数值合计，可选 `?station=` 精确过滤 |
+| GET | `/api/observations/batches` | 批次历史（含统计与失败原因） |
+| GET | `/examples/{name}` | 示例文件下载 |
+| GET | `/` `/ingest` | 核查页面 / 批次入库页面 |
 
 ## 目录结构
 
 ```
 app/
-  main.py            FastAPI 入口与接口
-  evaluator.py       解析 + 三值判定 + 依赖路径生成（核心，纯标准库）
+  main.py            FastAPI 入口与接口（核查 + 批次入库）
+  evaluator.py       核查：解析 + 三值判定 + 依赖路径生成（核心，纯标准库）
+  observations.py    入库：事件解析校验 + 批次事务化应用（核心，纯标准库）
   store.py           SQLite 快照存储（整版原子替换、失败留痕、WAL）
   static/index.html  核查页面
-examples/            本地示例（覆盖断供/备用组/缺失引用/无源循环全部情形）
-tests/               evaluator 单元测试（19 例）
+  static/ingest.html 批次入库页面
+examples/            本地示例（核查三件套 + obs_events.json 示例批次）
+tests/               单元测试（evaluator 19 例 + observations 19 例）
 Dockerfile / compose.yaml / requirements.txt
 ```

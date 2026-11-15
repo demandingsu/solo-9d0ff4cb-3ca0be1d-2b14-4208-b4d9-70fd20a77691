@@ -1,0 +1,11 @@
+{
+  "comment": "示例批次：写入 4 条观测、1 条更正（更高修订）、1 条撤回；重复上传本文件可验证幂等去重",
+  "events": [
+    {"observation_id": "obs-1001", "revision": 1, "station": "站点A", "hour": "2026-11-15T08", "value": 35.2, "op": "upsert"},
+    {"observation_id": "obs-1002", "revision": 1, "station": "站点A", "hour": "2026-11-15T08", "value": 41.0, "op": "upsert"},
+    {"observation_id": "obs-1003", "revision": 1, "station": "站点B", "hour": "2026-11-15T08", "value": 28.6, "op": "upsert"},
+    {"observation_id": "obs-1003", "revision": 2, "station": "站点B", "hour": "2026-11-15T09", "value": 30.1, "op": "upsert"},
+    {"observation_id": "obs-1004", "revision": 1, "station": "站点B", "hour": "2026-11-15T08", "value": 22.4, "op": "upsert"},
+    {"observation_id": "obs-1004", "revision": 2, "op": "retract"}
+  ]
+}

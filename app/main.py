@@ -10,6 +10,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from .evaluator import FormatError, build_report, parse_dependencies, parse_sources
+from .observations import BatchConflict, ObservationStore, parse_events
 from .store import SnapshotStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,7 +21,8 @@ DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR.parent / "data" / "dwcheck.db")
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 单文件 20MB 上限
 
 store = SnapshotStore(DB_PATH)
-app = FastAPI(title="环境监测数仓字段变更核查", version="1.0.0")
+obs_store = ObservationStore(DB_PATH)
+app = FastAPI(title="环境监测数仓值班工具", version="1.1.0")
 
 
 async def _read_json(upload: UploadFile, label: str) -> Any:
@@ -93,9 +95,50 @@ async def health():
     return {"status": "up"}
 
 
+# ---------------------------------------------------------------------------
+# 站点观测批次入库
+# ---------------------------------------------------------------------------
+
+@app.post("/api/observations/batches", status_code=201)
+async def create_observation_batch(
+    events_file: UploadFile = File(..., description="观测事件批次 JSON"),
+    name: str = Form(""),
+):
+    """整批入库观测事件。冲突或格式错误时整批拒绝，旧汇总保留并留痕。"""
+    batch_name = name.strip() or f"批次-{events_file.filename or '未命名'}"
+    try:
+        events = parse_events(await _read_json(events_file, "观测事件批次"))
+    except FormatError as e:
+        obs_store.record_failed(batch_name, f"格式错误：{e}")
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        batch_id, stats = obs_store.apply_batch(batch_name, events)
+    except BatchConflict as e:
+        obs_store.record_failed(batch_name, str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"id": batch_id, "name": batch_name, "stats": stats}
+
+
+@app.get("/api/observations/summary")
+async def get_observation_summary(station: str = ""):
+    """各站点每小时的有效记录数与数值合计（只读完整已发布结果）。"""
+    return {"items": obs_store.summary(station.strip() or None)}
+
+
+@app.get("/api/observations/batches")
+async def list_observation_batches():
+    return {"items": obs_store.batches()}
+
+
+@app.get("/ingest")
+async def ingest_page():
+    return FileResponse(STATIC_DIR / "ingest.html")
+
+
 @app.get("/examples/{filename}")
 async def get_example(filename: str):
-    if filename not in {"sources_before.json", "sources_after.json", "dependencies.json"}:
+    if filename not in {"sources_before.json", "sources_after.json", "dependencies.json",
+                        "obs_events.json"}:
         raise HTTPException(status_code=404, detail="未知示例文件")
     path = EXAMPLES_DIR / filename
     if not path.exists():

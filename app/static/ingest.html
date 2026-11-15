@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环境监测数仓 · 站点观测批次入库</title>
+<style>
+  :root {
+    --ok: #1a7f37; --ok-bg: #e6f4ea;
+    --broken: #c0392b; --broken-bg: #fdecea;
+    --unknown: #b26a00; --unknown-bg: #fff4e0;
+    --line: #d8dee4; --ink: #1f2328; --muted: #656d76;
+    --card: #ffffff; --bg: #f4f6f9; --accent: #0b5cad;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { background: #0d2c4f; color: #fff; padding: 14px 24px; display: flex;
+           align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header nav a { color: #cfe3f7; font-size: 13px; text-decoration: none; margin-right: 14px; }
+  header nav a.active { color: #fff; font-weight: 600; border-bottom: 2px solid #fff; padding-bottom: 2px; }
+  main { max-width: 1180px; margin: 20px auto; padding: 0 16px 60px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .field label { color: var(--muted); }
+  input[type=file], input[type=text] { font-size: 13px; padding: 6px; border: 1px solid var(--line);
+          border-radius: 6px; background: #fff; min-width: 220px; }
+  button { font-size: 13px; padding: 8px 16px; border: 0; border-radius: 6px; cursor: pointer;
+           background: var(--accent); color: #fff; }
+  button.ghost { background: #eef2f6; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .banner { display: none; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+  .banner.err { display: block; background: var(--broken-bg); color: var(--broken); border: 1px solid #f5c6c0; }
+  .banner.ok  { display: block; background: var(--ok-bg); color: var(--ok); border: 1px solid #b7dfc2; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 12px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat .n { font-size: 24px; font-weight: 700; }
+  .stat .t { font-size: 12px; color: var(--muted); }
+  .stat.ok .n { color: var(--ok); } .stat.warn .n { color: var(--unknown); }
+  .stat.mut .n { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: #fafbfc; position: sticky; top: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  .empty { color: var(--muted); font-size: 13.5px; padding: 18px; text-align: center; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.7; }
+  code { background: #eef2f6; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .hist { font-size: 12.5px; color: var(--muted); }
+  .hist table td, .hist table th { padding: 5px 8px; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.err { background: var(--broken-bg); color: var(--broken); }
+</style>
+</head>
+<body>
+<header>
+  <h1>环境监测数仓 · 站点观测批次入库</h1>
+  <nav>
+    <a href="/">字段变更核查</a>
+    <a href="/ingest" class="active">观测批次入库</a>
+  </nav>
+</header>
+<main>
+  <div class="card">
+    <h2>上传观测事件批次（JSON）</h2>
+    <div class="row">
+      <div class="field"><label>观测事件批次 JSON</label><input type="file" id="fEvents" accept=".json,application/json"></div>
+      <div class="field"><label>批次名称（可选）</label><input type="text" id="fName" placeholder="如：2026-11-15 08 时重投"></div>
+      <button id="btnUpload">整批入库</button>
+      <button class="ghost" id="btnExample">载入示例批次</button>
+    </div>
+    <div class="banner" id="banner"></div>
+    <div id="statsBox"></div>
+    <div class="hint">
+      事件格式：<code>{"observation_id":"观测ID","revision":修订号,"station":"站点","hour":"小时","value":数值,"op":"upsert"}</code>，
+      顶层为事件数组或 <code>{"events":[...]}</code>；撤回用 <code>"op":"retract"</code>（站点/小时/数值可省略）。<br>
+      入库口径：同一观测跨批次<b>只采用最高修订</b>，旧修订不得回滚结果；同修订重投内容一致只计一次，
+      <b>内容冲突则整批拒绝</b>并指出观测ID；撤回或更正站点/小时后会从原汇总扣除旧值；
+      批次并发上传互不丢修订，查询只读到完整已发布的结果，失败批次保留旧结果。
+      示例文件：<a href="/examples/obs_events.json">obs_events.json</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>站点 × 小时汇总（有效记录数 / 数值合计）</h2>
+    <div class="row" style="margin-bottom:10px">
+      <div class="field"><label>按站点过滤（精确匹配，留空为全部）</label>
+        <input type="text" id="fStation" placeholder="如：站点A"></div>
+      <button class="ghost" id="btnRefresh">刷新汇总</button>
+      <span class="hint" id="sumInfo" style="margin-top:0"></span>
+    </div>
+    <div style="overflow:auto; max-height: 60vh">
+      <table>
+        <thead><tr><th>站点</th><th>小时</th><th class="num">有效记录数</th><th class="num">数值合计</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="sumEmpty" style="display:none">暂无已入库的观测数据</div>
+    </div>
+  </div>
+
+  <div class="card hist">
+    <h2>批次历史（最近 20 条）</h2>
+    <div id="history"><div class="empty">暂无记录</div></div>
+  </div>
+</main>
+
+<script>
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function fmtNum(v) {
+  if (Number.isInteger(v)) return String(v);
+  return String(+v.toFixed(6));
+}
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function showBanner(kind, msg) {
+  const b = document.getElementById("banner");
+  b.className = "banner " + kind; b.textContent = msg;
+}
+
+function renderStats(s) {
+  document.getElementById("statsBox").innerHTML = `
+    <div class="summary">
+      <div class="stat"><div class="n">${s.received}</div><div class="t">本批接收事件</div></div>
+      <div class="stat ok"><div class="n">${s.applied}</div><div class="t">生效写入/更正</div></div>
+      <div class="stat mut"><div class="n">${s.retracted}</div><div class="t">生效撤回</div></div>
+      <div class="stat warn"><div class="n">${s.deduped}</div><div class="t">同修订重投去重</div></div>
+      <div class="stat warn"><div class="n">${s.stale}</div><div class="t">旧修订忽略</div></div>
+    </div>`;
+}
+
+async function upload(file) {
+  const fd = new FormData();
+  fd.append("events_file", file);
+  fd.append("name", document.getElementById("fName").value.trim());
+  const btn = document.getElementById("btnUpload");
+  btn.disabled = true; btn.textContent = "入库中…";
+  try {
+    const res = await api("/api/observations/batches", {method: "POST", body: fd});
+    const s = res.stats;
+    showBanner("ok", `批次 #${res.id}「${res.name}」整批入库成功：生效 ${s.applied} 条、撤回 ${s.retracted} 条、` +
+      `重投去重 ${s.deduped} 条、旧修订忽略 ${s.stale} 条。`);
+    renderStats(s);
+    await Promise.all([loadSummary(), loadHistory()]);
+  } catch (e) {
+    showBanner("err", "批次被拒绝，旧结果已保留：" + e.message);
+    document.getElementById("statsBox").innerHTML = "";
+    await loadHistory();
+  } finally {
+    btn.disabled = false; btn.textContent = "整批入库";
+  }
+}
+
+document.getElementById("btnUpload").onclick = () => {
+  const f = document.getElementById("fEvents").files[0];
+  if (!f) { showBanner("err", "请先选择观测事件批次 JSON 文件。"); return; }
+  upload(f);
+};
+
+document.getElementById("btnExample").onclick = async () => {
+  try {
+    const r = await fetch("/examples/obs_events.json");
+    if (!r.ok) throw new Error("示例文件未部署");
+    if (!document.getElementById("fName").value.trim())
+      document.getElementById("fName").value = "示例批次";
+    await upload(new File([await r.blob()], "obs_events.json", {type: "application/json"}));
+  } catch (e) { showBanner("err", e.message); }
+};
+
+async function loadSummary() {
+  const st = document.getElementById("fStation").value.trim();
+  const {items} = await api("/api/observations/summary" + (st ? "?station=" + encodeURIComponent(st) : ""));
+  const tb = document.getElementById("tbody");
+  document.getElementById("sumEmpty").style.display = items.length ? "none" : "block";
+  tb.innerHTML = items.map(i =>
+    `<tr><td class="mono">${esc(i.station)}</td><td class="mono">${esc(i.hour)}</td>` +
+    `<td class="num">${i.count}</td><td class="num">${fmtNum(i.total)}</td></tr>`).join("");
+  const cnt = items.reduce((a, i) => a + i.count, 0);
+  const tot = items.reduce((a, i) => a + i.total, 0);
+  document.getElementById("sumInfo").textContent =
+    items.length ? `共 ${items.length} 组（站点×小时），有效记录 ${cnt} 条，合计 ${fmtNum(tot)}` : "";
+}
+
+async function loadHistory() {
+  const {items} = await api("/api/observations/batches");
+  const el = document.getElementById("history");
+  if (!items.length) { el.innerHTML = '<div class="empty">暂无记录</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>ID</th><th>批次名称</th><th>时间</th><th>状态</th><th>统计 / 失败原因</th></tr></thead><tbody>` +
+    items.map(i => {
+      const badge = i.state === "applied" ? '<span class="badge ok">已入库</span>'
+                                          : '<span class="badge err">已拒绝</span>';
+      const detail = i.state === "applied" && i.stats
+        ? `接收 ${i.stats.received} · 生效 ${i.stats.applied} · 撤回 ${i.stats.retracted} · 去重 ${i.stats.deduped} · 旧修订 ${i.stats.stale}`
+        : esc(i.error || "");
+      return `<tr><td>${i.id}</td><td>${esc(i.name)}</td><td>${esc(i.created_at)}</td>` +
+             `<td>${badge}</td><td>${detail}</td></tr>`;
+    }).join("") + `</tbody></table>`;
+}
+
+document.getElementById("btnRefresh").onclick = loadSummary;
+document.getElementById("fStation").addEventListener("input", () => {
+  clearTimeout(window._st); window._st = setTimeout(loadSummary, 300);
+});
+Promise.all([loadSummary(), loadHistory()]);
+</script>
+</body>
+</html>
